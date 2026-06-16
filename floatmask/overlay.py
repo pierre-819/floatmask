@@ -11,7 +11,7 @@ def is_android():
 
 
 def _load_state():
-    defaults = {"x": 520, "y": 420, "w": 200, "h": 120, "color": 0}
+    defaults = {"x": 520, "y": 420, "w": 200, "h": 120, "color": 0, "alpha": 204}
     try:
         if STATE_FILE.exists():
             defaults.update(json.loads(STATE_FILE.read_text(encoding="utf-8")))
@@ -45,6 +45,8 @@ def _android_imports():
     TextView = autoclass("android.widget.TextView")
     FrameLayout = autoclass("android.widget.FrameLayout")
     FrameLayoutLayoutParams = autoclass("android.widget.FrameLayout$LayoutParams")
+    AlertDialog = autoclass("android.app.AlertDialog")
+    AlertDialogBuilder = autoclass("android.app.AlertDialog$Builder")
 
     return {
         "autoclass": autoclass,
@@ -64,6 +66,7 @@ def _android_imports():
         "TextView": TextView,
         "FrameLayout": FrameLayout,
         "FrameLayoutLayoutParams": FrameLayoutLayoutParams,
+        "AlertDialogBuilder": AlertDialogBuilder,
     }
 
 
@@ -79,10 +82,11 @@ def open_overlay_settings():
 
 
 class FloatMaskOverlay:
+    # (fill_color_with_alpha, stroke_color)
     COLORS = [
-        ("#99333333", "#FF111111"),
-        ("#CC000000", "#FFFFFFFF"),
-        ("#FF000000", "#FFFFFFFF"),
+        ("#99333333", "#FF111111"),  # 半透明灰
+        ("#CC000000", "#FFFFFFFF"),  # 半透明黑
+        ("#FF000000", "#FFFFFFFF"),  # 纯黑不透明
     ]
 
     def __init__(self):
@@ -94,6 +98,9 @@ class FloatMaskOverlay:
         self._view = None
         self._params = None
         self._start = None
+        # double-tap detection
+        self._last_tap_time = 0
+        self._DOUBLE_TAP_MS = 300
 
     def show(self, touchable=True):
         if not is_android():
@@ -134,6 +141,76 @@ class FloatMaskOverlay:
         if is_android() and self._view is not None:
             self._apply_background()
         _save_state(self.state)
+
+    def _show_long_press_menu(self):
+        """长按弹出菜单：透明度调节 + 关闭"""
+        if not is_android():
+            return
+        a = self._android
+        activity = a["PythonActivity"].mActivity
+        overlay = self
+
+        from jnius import PythonJavaClass, java_method
+
+        class AlphaClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+            __javacontext__ = "app"
+
+            def __init__(self, alpha_value):
+                super().__init__()
+                self._alpha = alpha_value
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, dialog, which):
+                overlay.state["alpha"] = self._alpha
+                _save_state(overlay.state)
+                overlay._apply_background()
+
+        class CloseClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, dialog, which):
+                overlay.close()
+
+        builder = a["AlertDialogBuilder"](activity)
+        builder.setTitle("FloatMask 菜单")
+
+        items = ["透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
+        listeners = [
+            AlphaClickListener(77),   # 30%  -> alpha 77/255
+            AlphaClickListener(153),  # 60%
+            AlphaClickListener(204),  # 80%
+            CloseClickListener(),
+        ]
+
+        # build items array via Java String[]
+        String = a["autoclass"]("java.lang.String")
+        arr = [String(it) for it in items]
+
+        from jnius import PythonJavaClass, java_method
+
+        class ItemClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, dialog, which):
+                listeners[which].onClick(dialog, which)
+                dialog.dismiss()
+
+        item_listener = ItemClickListener()
+        # Use setItems via CharSequence[]
+        CharSequence = a["autoclass"]("java.lang.CharSequence")
+        ObjectArray = a["autoclass"]("java.lang.reflect.Array")
+        # Simpler: use individual setPositiveButton etc. for 4 options via builder items
+        builder.setItems(arr, item_listener)
+        dialog = builder.create()
+        dialog.getWindow().setType(a["LayoutParams"].TYPE_APPLICATION_OVERLAY
+                                   if a["BuildVersion"].SDK_INT >= 26
+                                   else a["LayoutParams"].TYPE_PHONE)
+        dialog.show()
 
     def _create_view(self):
         a = _android_imports()
@@ -178,11 +255,13 @@ class FloatMaskOverlay:
         frame.addView(resize, resize_params)
 
         frame.setOnTouchListener(self._make_touch_listener(False))
+        frame.setOnLongClickListener(self._make_long_press_listener())
         resize.setOnTouchListener(self._make_touch_listener(True))
         self._view = frame
 
     def _make_touch_listener(self, resizing):
         from jnius import PythonJavaClass, java_method
+        import time
 
         overlay = self
         MotionEvent = self._android["MotionEvent"] if self._android else None
@@ -194,6 +273,8 @@ class FloatMaskOverlay:
             @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
             def onTouch(self, view, event):
                 action = event.getAction()
+                now_ms = int(time.time() * 1000)
+
                 if action == MotionEvent.ACTION_DOWN:
                     overlay._start = {
                         "raw_x": int(event.getRawX()),
@@ -202,30 +283,65 @@ class FloatMaskOverlay:
                         "y": int(overlay._params.y),
                         "w": int(overlay._params.width),
                         "h": int(overlay._params.height),
+                        "moved": False,
+                        "time": now_ms,
                     }
                     return True
+
                 if action == MotionEvent.ACTION_MOVE and overlay._start:
                     dx = int(event.getRawX()) - overlay._start["raw_x"]
                     dy = int(event.getRawY()) - overlay._start["raw_y"]
-                    if resizing:
-                        overlay._resize(overlay._start["w"] + dx, overlay._start["h"] + dy)
-                    else:
-                        overlay._move(overlay._start["x"] + dx, overlay._start["y"] + dy)
-                    overlay._wm.updateViewLayout(overlay._view, overlay._params)
+                    if abs(dx) > 8 or abs(dy) > 8:
+                        overlay._start["moved"] = True
+                    if overlay._start["moved"]:
+                        if resizing:
+                            overlay._resize(overlay._start["w"] + dx, overlay._start["h"] + dy)
+                        else:
+                            overlay._move(overlay._start["x"] + dx, overlay._start["y"] + dy)
+                        overlay._wm.updateViewLayout(overlay._view, overlay._params)
                     return True
+
                 if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+                    if overlay._start and not overlay._start["moved"] and not resizing:
+                        # tap — check double tap
+                        elapsed = now_ms - overlay._last_tap_time
+                        if 0 < elapsed < overlay._DOUBLE_TAP_MS:
+                            # double tap: switch color
+                            overlay.switch_color()
+                            overlay._last_tap_time = 0
+                        else:
+                            overlay._last_tap_time = now_ms
+                    if overlay._start and overlay._start["moved"]:
+                        overlay.state.update({
+                            "x": int(overlay._params.x),
+                            "y": int(overlay._params.y),
+                            "w": int(overlay._params.width),
+                            "h": int(overlay._params.height),
+                        })
+                        _save_state(overlay.state)
                     overlay._start = None
-                    overlay.state.update({
-                        "x": int(overlay._params.x),
-                        "y": int(overlay._params.y),
-                        "w": int(overlay._params.width),
-                        "h": int(overlay._params.height),
-                    })
-                    _save_state(overlay.state)
                     return True
+
+                # Long press via GestureDetector not available here;
+                # detect manually: ACTION_DOWN held > 600ms without move
                 return False
 
         return TouchListener()
+
+    def _make_long_press_listener(self):
+        from jnius import PythonJavaClass, java_method
+        overlay = self
+
+        class LongClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/view/View$OnLongClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/view/View;)Z")
+            def onLongClick(self, view):
+                overlay._show_long_press_menu()
+                return True
+
+        return LongClickListener()
 
     def _move(self, x, y):
         display = self._wm.getDefaultDisplay()
@@ -254,7 +370,16 @@ class FloatMaskOverlay:
             frame = self._view
         a = self._android
         fill, stroke = self.COLORS[int(self.state.get("color", 0))]
+        # Apply alpha from state (override alpha channel in fill color)
+        alpha = int(self.state.get("alpha", 204))
         drawable = a["GradientDrawable"]()
-        drawable.setColor(a["Color"].parseColor(fill))
+        base_color = a["Color"].parseColor(fill)
+        # blend alpha into color
+        r = (base_color >> 16) & 0xFF
+        g = (base_color >> 8) & 0xFF
+        b = base_color & 0xFF
+        final_color = a["Color"].argb(alpha, r, g, b)
+        drawable.setColor(final_color)
         drawable.setStroke(4, a["Color"].parseColor(stroke))
+        drawable.setCornerRadius(12)
         frame.setBackground(drawable)

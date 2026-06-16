@@ -54,7 +54,7 @@ RootView:
         on_release: root.enable_pass_through()
 
     Button:
-        text: "切换颜色"
+        text: "切换颜色（或双击悬浮框）"
         size_hint_y: None
         height: dp(48)
         on_release: root.switch_color()
@@ -72,7 +72,7 @@ RootView:
 class RootView(BoxLayout):
     mask_visible = BooleanProperty(False)
     status_text = StringProperty(
-        "使用步骤：先授权悬浮窗权限，再显示悬浮框。编辑时可拖动和拉伸，遮挡模式会开启点击穿透，适合盖住视频字幕。"
+        "使用步骤：先授权悬浮窗权限，再显示悬浮框。编辑时可拖动和拉伸，遮挡模式开启点击穿透。双击悬浮框切换颜色，长按弹出菜单调节透明度。"
     )
 
     def __init__(self, **kwargs):
