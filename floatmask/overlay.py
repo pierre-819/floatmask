@@ -27,6 +27,33 @@ def _save_state(state):
         pass
 
 
+def _run_on_ui_thread(activity, fn):
+    """Execute fn() on the Android main UI thread and block until done."""
+    from jnius import PythonJavaClass, java_method
+    import threading
+
+    done = threading.Event()
+    exc_box = []
+
+    class Run(PythonJavaClass):
+        __javainterfaces__ = ["java/lang/Runnable"]
+        __javacontext__ = "app"
+
+        @java_method("()V")
+        def run(self):
+            try:
+                fn()
+            except Exception as e:
+                exc_box.append(e)
+            finally:
+                done.set()
+
+    activity.runOnUiThread(Run())
+    done.wait()
+    if exc_box:
+        raise exc_box[0]
+
+
 def _android_imports():
     from jnius import autoclass, cast
 
@@ -124,22 +151,26 @@ class FloatMaskOverlay:
         if not is_android():
             self.visible = True
             return
-        # Check permission before attempting to show
         if not check_overlay_permission():
             raise RuntimeError("未获得悬浮窗权限，请先点击步骤1授权")
         self.touchable = touchable
+        # Reset stale view
         if self._view is not None and self._wm is not None:
             try:
                 self._apply_flags()
-                self._wm.updateViewLayout(self._view, self._params)
+                activity = self._android["PythonActivity"].mActivity
+                params, view = self._params, self._view
+                _run_on_ui_thread(activity, lambda: self._wm.updateViewLayout(view, params))
                 self.visible = True
                 return
             except Exception:
                 self._view = None
                 self._params = None
         self._create_view()
+        activity = self._android["PythonActivity"].mActivity
+        view, params = self._view, self._params
         try:
-            self._wm.addView(self._view, self._params)
+            _run_on_ui_thread(activity, lambda: self._wm.addView(view, params))
         except Exception as e:
             self._view = None
             self._params = None
@@ -149,7 +180,10 @@ class FloatMaskOverlay:
     def close(self):
         if is_android() and self._view is not None and self._wm is not None:
             try:
-                self._wm.removeView(self._view)
+                android = self._android
+                wm, view = self._wm, self._view
+                activity = android["PythonActivity"].mActivity
+                _run_on_ui_thread(activity, lambda: wm.removeView(view))
             except Exception:
                 pass
         self._view = None
@@ -165,7 +199,9 @@ class FloatMaskOverlay:
             self.show(touchable=touchable)
             return
         self._apply_flags()
-        self._wm.updateViewLayout(self._view, self._params)
+        activity = self._android["PythonActivity"].mActivity
+        wm, view, params = self._wm, self._view, self._params
+        _run_on_ui_thread(activity, lambda: wm.updateViewLayout(view, params))
 
     def switch_color(self):
         self.state["color"] = (int(self.state.get("color", 0)) + 1) % len(self.COLORS)
