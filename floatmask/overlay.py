@@ -174,8 +174,9 @@ class FloatMaskOverlay:
             def onClick(self, dialog, which):
                 overlay.close()
 
+        JString = a["autoclass"]("java.lang.String")
         builder = a["AlertDialogBuilder"](activity)
-        builder.setTitle("FloatMask 菜单")
+        builder.setTitle(JString("FloatMask 菜单"))
 
         items = ["透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
         listeners = [
@@ -186,8 +187,7 @@ class FloatMaskOverlay:
         ]
 
         # build items array via Java String[]
-        String = a["autoclass"]("java.lang.String")
-        arr = [String(it) for it in items]
+        arr = [a["autoclass"]("java.lang.String")(it) for it in items]
 
         from jnius import PythonJavaClass, java_method
 
@@ -239,14 +239,15 @@ class FloatMaskOverlay:
         self._apply_background(frame)
 
         hint = a["TextView"](activity)
-        hint.setText("FloatMask")
+        JString = a["autoclass"]("java.lang.String")
+        hint.setText(a["cast"]("java.lang.CharSequence", JString("FloatMask")))
         hint.setTextSize(12)
         hint.setTextColor(a["Color"].WHITE)
         hint.setPadding(12, 8, 8, 8)
         frame.addView(hint)
 
         resize = a["TextView"](activity)
-        resize.setText("↘")
+        resize.setText(a["cast"]("java.lang.CharSequence", JString("\u2198")))
         resize.setTextSize(22)
         resize.setTextColor(a["Color"].WHITE)
         resize.setGravity(a["Gravity"].CENTER)
