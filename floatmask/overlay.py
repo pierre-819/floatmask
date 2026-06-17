@@ -11,7 +11,7 @@ def is_android():
 
 
 def _load_state():
-    defaults = {"x": -1, "y": -1, "w": 200, "h": 120, "color": 0, "alpha": 204}
+    defaults = {"x": -1, "y": -1, "w": 200, "h": 120, "color": 0, "alpha": -1}
     try:
         if STATE_FILE.exists():
             defaults.update(json.loads(STATE_FILE.read_text(encoding="utf-8")))
@@ -432,8 +432,8 @@ class FloatMaskOverlay:
 
     def _resize(self, width, height):
         display = self._wm.getDefaultDisplay()
-        max_w = max(80, int(display.getWidth() * 0.3))
-        max_h = max(80, int(display.getHeight() * 0.3))
+        max_w = max(80, int(display.getWidth() * 0.8))
+        max_h = max(80, int(display.getHeight() * 0.8))
         self._params.width = max(80, min(int(width), max_w))
         self._params.height = max(80, min(int(height), max_h))
 
@@ -448,15 +448,18 @@ class FloatMaskOverlay:
             frame = self._view
         a = self._android
         fill, stroke = self.COLORS[int(self.state.get("color", 0))]
-        # Apply alpha from state (override alpha channel in fill color)
-        alpha = int(self.state.get("alpha", 204))
         drawable = a["GradientDrawable"]()
         base_color = a["Color"].parseColor(fill)
-        # blend alpha into color
-        r = (base_color >> 16) & 0xFF
-        g = (base_color >> 8) & 0xFF
-        b = base_color & 0xFF
-        final_color = a["Color"].argb(alpha, r, g, b)
+        # 如果用户在长按菜单中手动调过透明度（alpha >= 0），用用户值覆盖；
+        # 否则尊重 COLORS 颜色中预设的 alpha 通道（保证"纯黑不透明"是真不透明）
+        user_alpha = int(self.state.get("alpha", -1))
+        if user_alpha >= 0:
+            r = (base_color >> 16) & 0xFF
+            g = (base_color >> 8) & 0xFF
+            b = base_color & 0xFF
+            final_color = a["Color"].argb(user_alpha, r, g, b)
+        else:
+            final_color = base_color
         drawable.setColor(final_color)
         drawable.setStroke(4, a["Color"].parseColor(stroke))
         drawable.setCornerRadius(12)

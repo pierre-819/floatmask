@@ -2,10 +2,19 @@ from kivy.app import App
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.popup import Popup
+from kivy.uix.label import Label
+from kivy.uix.button import Button
+from kivy.clock import Clock
 from kivy.core.text import LabelBase
 import os
 
-from floatmask.overlay import FloatMaskOverlay, is_android, open_overlay_settings
+from floatmask.overlay import (
+    FloatMaskOverlay,
+    is_android,
+    open_overlay_settings,
+    check_overlay_permission,
+)
 
 # 注册中文字体
 _font_path = os.path.join(os.path.dirname(__file__), "simSun.ttc")
@@ -95,10 +104,55 @@ class RootView(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.overlay = FloatMaskOverlay()
+        # 启动后稍延迟检测权限，避免界面尚未渲染
+        Clock.schedule_once(lambda dt: self._check_permission_on_start(), 0.5)
+
+    def _check_permission_on_start(self):
+        if not is_android():
+            return
+        if check_overlay_permission():
+            return
+        self._show_permission_dialog()
+
+    def _show_permission_dialog(self):
+        content = BoxLayout(orientation="vertical", spacing=12, padding=16)
+        msg = Label(
+            text="FloatMask 想要获取您的悬浮窗权限\n用于在视频 App 上方显示遮挡框",
+            font_name=_FONT,
+            halign="center",
+            valign="middle",
+        )
+        msg.bind(size=lambda s, v: setattr(s, "text_size", v))
+        content.add_widget(msg)
+
+        btn_row = BoxLayout(orientation="horizontal", spacing=12, size_hint_y=None, height="48dp")
+        btn_cancel = Button(text="取消", font_name=_FONT)
+        btn_ok = Button(text="允许", font_name=_FONT)
+        btn_row.add_widget(btn_cancel)
+        btn_row.add_widget(btn_ok)
+        content.add_widget(btn_row)
+
+        popup = Popup(
+            title="权限申请",
+            title_font=_FONT,
+            content=content,
+            size_hint=(0.8, 0.4),
+            auto_dismiss=False,
+        )
+        btn_cancel.bind(on_release=lambda *_: popup.dismiss())
+        def _allow(*_):
+            popup.dismiss()
+            open_overlay_settings()
+            self.status_text = "已跳转到系统设置。授权后回到 FloatMask，点击显示悬浮框。"
+        btn_ok.bind(on_release=_allow)
+        popup.open()
 
     def request_permission(self):
         if not is_android():
             self.status_text = "当前不是 Android 环境。请打包 APK 后在真机上测试悬浮窗权限。"
+            return
+        if check_overlay_permission():
+            self.status_text = "悬浮窗权限已开启，可直接显示悬浮框。"
             return
         open_overlay_settings()
         self.status_text = "已跳转到系统设置。授权后回到 FloatMask，点击显示悬浮框。"
