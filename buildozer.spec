@@ -4,7 +4,7 @@ package.name = floatmask
 package.domain = org.course
 
 source.dir = .
-source.include_exts = py,png,jpg,kv,json
+source.include_exts = py,png,jpg,kv,json,ttc,ttf
 
 version = 0.1.0
 requirements = python3,kivy,jnius

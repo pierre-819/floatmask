@@ -2,10 +2,20 @@ from kivy.app import App
 from kivy.lang import Builder
 from kivy.properties import BooleanProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
+from kivy.core.text import LabelBase
+import os
 
 from floatmask.overlay import FloatMaskOverlay, is_android, open_overlay_settings
 
-KV = """
+# 注册中文字体
+_font_path = os.path.join(os.path.dirname(__file__), "simSun.ttc")
+if os.path.exists(_font_path):
+    LabelBase.register(name="SimSun", fn_regular=_font_path)
+    _FONT = "SimSun"
+else:
+    _FONT = "Roboto"
+
+KV = f"""
 RootView:
     orientation: "vertical"
     padding: dp(18)
@@ -21,6 +31,7 @@ RootView:
     Label:
         text: "FloatMask 智能字幕遮挡工具"
         color: 0.08, 0.10, 0.14, 1
+        font_name: "{_FONT}"
         font_size: "22sp"
         bold: True
         size_hint_y: None
@@ -29,6 +40,7 @@ RootView:
     Label:
         text: root.status_text
         color: 0.18, 0.22, 0.30, 1
+        font_name: "{_FONT}"
         halign: "left"
         valign: "middle"
         text_size: self.width, None
@@ -37,30 +49,35 @@ RootView:
 
     Button:
         text: "1. 开启悬浮窗权限"
+        font_name: "{_FONT}"
         size_hint_y: None
         height: dp(48)
         on_release: root.request_permission()
 
     Button:
         text: "2. 显示/编辑悬浮框"
+        font_name: "{_FONT}"
         size_hint_y: None
         height: dp(48)
         on_release: root.show_editable_mask()
 
     Button:
         text: "3. 切换到遮挡模式（点击穿透）"
+        font_name: "{_FONT}"
         size_hint_y: None
         height: dp(48)
         on_release: root.enable_pass_through()
 
     Button:
         text: "切换颜色（或双击悬浮框）"
+        font_name: "{_FONT}"
         size_hint_y: None
         height: dp(48)
         on_release: root.switch_color()
 
     Button:
         text: "关闭悬浮框"
+        font_name: "{_FONT}"
         size_hint_y: None
         height: dp(48)
         on_release: root.close_mask()
