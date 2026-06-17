@@ -18,7 +18,7 @@ else:
 KV = f"""
 RootView:
     orientation: "vertical"
-    padding: dp(18)
+    padding: dp(18), dp(48), dp(18), dp(18)
     spacing: dp(14)
 
     canvas.before:
