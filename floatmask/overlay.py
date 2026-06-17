@@ -11,7 +11,7 @@ def is_android():
 
 
 def _load_state():
-    defaults = {"x": 520, "y": 420, "w": 200, "h": 120, "color": 0, "alpha": 204}
+    defaults = {"x": -1, "y": -1, "w": 200, "h": 120, "color": 0, "alpha": 204}
     try:
         if STATE_FILE.exists():
             defaults.update(json.loads(STATE_FILE.read_text(encoding="utf-8")))
@@ -297,6 +297,16 @@ class FloatMaskOverlay:
             -3,
         )
         self._params.gravity = a["Gravity"].LEFT | a["Gravity"].TOP
+
+        # 首次启动（x=-1）：计算屏幕中央偏右位置
+        display = activity.getWindowManager().getDefaultDisplay()
+        screen_w = display.getWidth()
+        screen_h = display.getHeight()
+        if int(self.state["x"]) < 0:
+            self.state["x"] = int(screen_w * 0.6)
+        if int(self.state["y"]) < 0:
+            self.state["y"] = int(screen_h * 0.4)
+
         self._params.x = int(self.state["x"])
         self._params.y = int(self.state["y"])
         self._apply_flags()
