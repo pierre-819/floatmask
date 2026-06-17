@@ -77,8 +77,26 @@ def open_overlay_settings():
     activity = a["PythonActivity"].mActivity
     package_name = activity.getPackageName()
     uri = a["Uri"].parse("package:" + package_name)
-    intent = a["Intent"](a["Settings"].ACTION_MANAGE_OVERLAY_PERMISSION, uri)
-    activity.startActivity(intent)
+    # Try ACTION_MANAGE_OVERLAY_PERMISSION first
+    try:
+        intent = a["Intent"](a["Settings"].ACTION_MANAGE_OVERLAY_PERMISSION, uri)
+        activity.startActivity(intent)
+    except Exception:
+        # Fallback: open app settings
+        intent = a["Intent"](a["Settings"].ACTION_APPLICATION_DETAILS_SETTINGS, uri)
+        activity.startActivity(intent)
+
+
+def check_overlay_permission():
+    """Return True if SYSTEM_ALERT_WINDOW permission is granted."""
+    if not is_android():
+        return True
+    try:
+        a = _android_imports()
+        activity = a["PythonActivity"].mActivity
+        return a["Settings"].canDrawOverlays(activity)
+    except Exception:
+        return False
 
 
 class FloatMaskOverlay:
@@ -106,13 +124,26 @@ class FloatMaskOverlay:
         if not is_android():
             self.visible = True
             return
+        # Check permission before attempting to show
+        if not check_overlay_permission():
+            raise RuntimeError("未获得悬浮窗权限，请先点击步骤1授权")
         self.touchable = touchable
-        if self._view is None:
-            self._create_view()
+        if self._view is not None and self._wm is not None:
+            try:
+                self._apply_flags()
+                self._wm.updateViewLayout(self._view, self._params)
+                self.visible = True
+                return
+            except Exception:
+                self._view = None
+                self._params = None
+        self._create_view()
+        try:
             self._wm.addView(self._view, self._params)
-        else:
-            self._apply_flags()
-            self._wm.updateViewLayout(self._view, self._params)
+        except Exception as e:
+            self._view = None
+            self._params = None
+            raise RuntimeError(f"addView失败: {e}") from e
         self.visible = True
 
     def close(self):
