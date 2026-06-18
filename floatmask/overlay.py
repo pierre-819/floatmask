@@ -146,6 +146,12 @@ class FloatMaskOverlay:
         # double-tap detection
         self._last_tap_time = 0
         self._DOUBLE_TAP_MS = 300
+        self._LONG_PRESS_MS = 600
+        # minimize state
+        self._minimized = False
+        self._restore_size = None  # (w, h) before minimize
+        self._min_btn = None
+        self._resize_btn = None
 
     def show(self, touchable=True):
         if not is_android():
@@ -188,6 +194,9 @@ class FloatMaskOverlay:
                 pass
         self._view = None
         self._params = None
+        self._min_btn = None
+        self._resize_btn = None
+        self._minimized = False
         self.visible = False
         _save_state(self.state)
 
@@ -315,26 +324,41 @@ class FloatMaskOverlay:
         frame.setPadding(4, 4, 4, 4)
         self._apply_background(frame)
 
-        hint = a["TextView"](activity)
         JString = a["autoclass"]("java.lang.String")
+
+        hint = a["TextView"](activity)
         hint.setText(a["cast"]("java.lang.CharSequence", JString("FloatMask")))
         hint.setTextSize(12)
         hint.setTextColor(a["Color"].WHITE)
         hint.setPadding(12, 8, 8, 8)
         frame.addView(hint)
 
+        # 最小化按钮（右上角）
+        min_btn = a["TextView"](activity)
+        min_btn.setText(a["cast"]("java.lang.CharSequence", JString("\u25CF")))  # ●
+        min_btn.setTextSize(16)
+        min_btn.setTextColor(a["Color"].WHITE)
+        min_btn.setGravity(a["Gravity"].CENTER)
+        min_params = a["FrameLayoutLayoutParams"](72, 72)
+        min_params.gravity = a["Gravity"].RIGHT | a["Gravity"].TOP
+        frame.addView(min_btn, min_params)
+        self._min_btn = min_btn
+
+        # 缩放按钮（右下角），尺寸放大并加 padding 防裁切
         resize = a["TextView"](activity)
         resize.setText(a["cast"]("java.lang.CharSequence", JString("\u2198")))
-        resize.setTextSize(22)
+        resize.setTextSize(20)
         resize.setTextColor(a["Color"].WHITE)
         resize.setGravity(a["Gravity"].CENTER)
-        resize_params = a["FrameLayoutLayoutParams"](64, 64)
+        resize.setPadding(8, 8, 12, 12)
+        resize_params = a["FrameLayoutLayoutParams"](88, 88)
         resize_params.gravity = a["Gravity"].RIGHT | a["Gravity"].BOTTOM
         frame.addView(resize, resize_params)
+        self._resize_btn = resize
 
         frame.setOnTouchListener(self._make_touch_listener(False))
-        frame.setOnLongClickListener(self._make_long_press_listener())
         resize.setOnTouchListener(self._make_touch_listener(True))
+        min_btn.setOnClickListener(self._make_minimize_listener())
         self._view = frame
 
     def _make_touch_listener(self, resizing):
@@ -362,6 +386,7 @@ class FloatMaskOverlay:
                         "w": int(overlay._params.width),
                         "h": int(overlay._params.height),
                         "moved": False,
+                        "long_fired": False,
                         "time": now_ms,
                     }
                     return True
@@ -376,19 +401,36 @@ class FloatMaskOverlay:
                             overlay._resize(overlay._start["w"] + dx, overlay._start["h"] + dy)
                         else:
                             overlay._move(overlay._start["x"] + dx, overlay._start["y"] + dy)
-                        overlay._wm.updateViewLayout(overlay._view, overlay._params)
+                        try:
+                            overlay._wm.updateViewLayout(overlay._view, overlay._params)
+                        except Exception:
+                            pass
+                    else:
+                        # 静止超过 LONG_PRESS_MS 触发长按
+                        if (not resizing
+                            and not overlay._start["long_fired"]
+                            and (now_ms - overlay._start["time"]) > overlay._LONG_PRESS_MS):
+                            overlay._start["long_fired"] = True
+                            overlay._show_long_press_menu()
                     return True
 
                 if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
-                    if overlay._start and not overlay._start["moved"] and not resizing:
-                        # tap — check double tap
-                        elapsed = now_ms - overlay._last_tap_time
-                        if 0 < elapsed < overlay._DOUBLE_TAP_MS:
-                            # double tap: switch color
-                            overlay.switch_color()
-                            overlay._last_tap_time = 0
+                    if (overlay._start
+                        and not overlay._start["moved"]
+                        and not overlay._start["long_fired"]
+                        and not resizing):
+                        held = now_ms - overlay._start["time"]
+                        if held > overlay._LONG_PRESS_MS:
+                            # 长按抬起也算长按
+                            overlay._show_long_press_menu()
                         else:
-                            overlay._last_tap_time = now_ms
+                            # tap — check double tap
+                            elapsed = now_ms - overlay._last_tap_time
+                            if 0 < elapsed < overlay._DOUBLE_TAP_MS:
+                                overlay.switch_color()
+                                overlay._last_tap_time = 0
+                            else:
+                                overlay._last_tap_time = now_ms
                     if overlay._start and overlay._start["moved"]:
                         overlay.state.update({
                             "x": int(overlay._params.x),
@@ -400,11 +442,46 @@ class FloatMaskOverlay:
                     overlay._start = None
                     return True
 
-                # Long press via GestureDetector not available here;
-                # detect manually: ACTION_DOWN held > 600ms without move
                 return False
 
         return TouchListener()
+
+    def _make_minimize_listener(self):
+        from jnius import PythonJavaClass, java_method
+        overlay = self
+
+        class ClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/view/View$OnClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/view/View;)V")
+            def onClick(self, view):
+                overlay.toggle_minimize()
+
+        return ClickListener()
+
+    def toggle_minimize(self):
+        if not is_android() or self._view is None:
+            return
+        a = self._android
+        activity = a["PythonActivity"].mActivity
+        if not self._minimized:
+            # 进入最小化：保存当前尺寸，缩小为 80x80 圆点
+            self._restore_size = (int(self._params.width), int(self._params.height))
+            self._params.width = 80
+            self._params.height = 80
+            if self._resize_btn is not None:
+                self._resize_btn.setVisibility(self._android["View"].GONE)
+            self._minimized = True
+        else:
+            w, h = self._restore_size or (200, 120)
+            self._params.width = int(w)
+            self._params.height = int(h)
+            if self._resize_btn is not None:
+                self._resize_btn.setVisibility(self._android["View"].VISIBLE)
+            self._minimized = False
+        wm, view, params = self._wm, self._view, self._params
+        _run_on_ui_thread(activity, lambda: wm.updateViewLayout(view, params))
 
     def _make_long_press_listener(self):
         from jnius import PythonJavaClass, java_method
