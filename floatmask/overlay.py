@@ -174,6 +174,13 @@ class FloatMaskOverlay:
         # independent restore button used while main mask is click-through
         self._restore_view = None
         self._restore_params = None
+        # 保留 Java 回调代理的 Python 引用，避免 pyjnius 对象被回收后点击崩溃。
+        self._touch_listener = None
+        self._resize_listener = None
+        self._restore_click_listener = None
+        self._restore_long_listener = None
+        self._menu_item_listener = None
+        self._menu_action_listeners = None
 
     def show(self, touchable=True):
         """显示主遮挡框。
@@ -231,6 +238,12 @@ class FloatMaskOverlay:
         self._params = None
         self._hint = None
         self._resize_btn = None
+        self._touch_listener = None
+        self._resize_listener = None
+        self._restore_click_listener = None
+        self._restore_long_listener = None
+        self._menu_item_listener = None
+        self._menu_action_listeners = None
         self._minimized = False
         self.visible = False
         _save_state(self.state)
@@ -278,7 +291,10 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/content/DialogInterface;I)V")
             def onClick(self, dialog, which):
-                overlay.switch_color()
+                try:
+                    overlay.switch_color()
+                except Exception:
+                    pass
 
         class TouchModeClickListener(PythonJavaClass):
             __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
@@ -286,7 +302,10 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/content/DialogInterface;I)V")
             def onClick(self, dialog, which):
-                overlay.set_touchable(not overlay.touchable)
+                try:
+                    overlay.set_touchable(not overlay.touchable)
+                except Exception:
+                    pass
 
         class CloseClickListener(PythonJavaClass):
             __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
@@ -294,7 +313,10 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/content/DialogInterface;I)V")
             def onClick(self, dialog, which):
-                overlay.close()
+                try:
+                    overlay.close()
+                except Exception:
+                    pass
 
         JString = a["autoclass"]("java.lang.String")
         builder = a["AlertDialogBuilder"](activity)
@@ -308,6 +330,7 @@ class FloatMaskOverlay:
             TouchModeClickListener(),
             CloseClickListener(),
         ]
+        self._menu_action_listeners = listeners
 
         # build items array via Java String[]
         arr = [a["autoclass"]("java.lang.String")(it) for it in items]
@@ -320,10 +343,14 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/content/DialogInterface;I)V")
             def onClick(self, dialog, which):
-                listeners[which].onClick(dialog, which)
-                dialog.dismiss()
+                try:
+                    listeners[which].onClick(dialog, which)
+                    dialog.dismiss()
+                except Exception:
+                    pass
 
         item_listener = ItemClickListener()
+        self._menu_item_listener = item_listener
         # Use setItems via CharSequence[]
         CharSequence = a["autoclass"]("java.lang.CharSequence")
         ObjectArray = a["autoclass"]("java.lang.reflect.Array")
@@ -377,8 +404,10 @@ class FloatMaskOverlay:
             drawable.setShape(a["GradientDrawable"].OVAL)
             drawable.setColor(a["Color"].argb(220, 0, 0, 0))
             restore.setBackground(drawable)
-            restore.setOnClickListener(self._make_restore_click_listener())
-            restore.setOnLongClickListener(self._make_restore_long_listener())
+            self._restore_click_listener = self._make_restore_click_listener()
+            self._restore_long_listener = self._make_restore_long_listener()
+            restore.setOnClickListener(self._restore_click_listener)
+            restore.setOnLongClickListener(self._restore_long_listener)
 
             self._restore_view = restore
             self._wm.addView(self._restore_view, self._restore_params)
@@ -398,6 +427,8 @@ class FloatMaskOverlay:
             pass
         self._restore_view = None
         self._restore_params = None
+        self._restore_click_listener = None
+        self._restore_long_listener = None
 
     def _make_restore_click_listener(self):
         from jnius import PythonJavaClass, java_method
@@ -409,7 +440,10 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/view/View;)V")
             def onClick(self, view):
-                overlay.set_touchable(True)
+                try:
+                    overlay.set_touchable(True)
+                except Exception:
+                    pass
 
         return RestoreClickListener()
 
@@ -423,7 +457,10 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/view/View;)Z")
             def onLongClick(self, view):
-                overlay._show_long_press_menu()
+                try:
+                    overlay._show_long_press_menu()
+                except Exception:
+                    pass
                 return True
 
         return RestoreLongListener()
@@ -487,8 +524,10 @@ class FloatMaskOverlay:
         frame.addView(resize, resize_params)
         self._resize_btn = resize
 
-        frame.setOnTouchListener(self._make_touch_listener(False))
-        resize.setOnTouchListener(self._make_touch_listener(True))
+        self._touch_listener = self._make_touch_listener(False)
+        self._resize_listener = self._make_touch_listener(True)
+        frame.setOnTouchListener(self._touch_listener)
+        resize.setOnTouchListener(self._resize_listener)
         self._view = frame
 
     def _make_touch_listener(self, resizing):
