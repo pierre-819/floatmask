@@ -173,6 +173,9 @@ class RootView(BoxLayout):
             self.status_text = f"切换失败：{exc}"
 
     def switch_color(self):
+        if is_android() and not check_overlay_permission():
+            self.status_text = "切换失败：请先点击步骤一获取悬浮窗权限。"
+            return
         try:
             self.overlay.switch_color()
             self.status_text = "已切换遮挡颜色。"
