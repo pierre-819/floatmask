@@ -152,6 +152,9 @@ class FloatMaskOverlay:
         self._restore_size = None  # (w, h) before minimize
         self._hint = None
         self._resize_btn = None
+        # independent restore button used while main mask is click-through
+        self._restore_view = None
+        self._restore_params = None
 
     def show(self, touchable=True):
         if not is_android():
@@ -160,13 +163,16 @@ class FloatMaskOverlay:
         if not check_overlay_permission():
             raise RuntimeError("未获得悬浮窗权限，请先点击步骤1授权")
         self.touchable = touchable
-        # Reset stale view
         if self._view is not None and self._wm is not None:
             try:
                 self._apply_flags()
                 activity = self._android["PythonActivity"].mActivity
                 params, view = self._params, self._view
                 _run_on_ui_thread(activity, lambda: self._wm.updateViewLayout(view, params))
+                if self.touchable:
+                    self._hide_restore_button()
+                else:
+                    self._show_restore_button()
                 self.visible = True
                 return
             except Exception:
@@ -181,9 +187,14 @@ class FloatMaskOverlay:
             self._view = None
             self._params = None
             raise RuntimeError(f"addView失败: {e}") from e
+        if self.touchable:
+            self._hide_restore_button()
+        else:
+            self._show_restore_button()
         self.visible = True
 
     def close(self):
+        self._hide_restore_button()
         if is_android() and self._view is not None and self._wm is not None:
             try:
                 android = self._android
@@ -211,6 +222,10 @@ class FloatMaskOverlay:
         activity = self._android["PythonActivity"].mActivity
         wm, view, params = self._wm, self._view, self._params
         _run_on_ui_thread(activity, lambda: wm.updateViewLayout(view, params))
+        if self.touchable:
+            self._hide_restore_button()
+        else:
+            self._show_restore_button()
 
     def switch_color(self):
         self.state["color"] = (int(self.state.get("color", 0)) + 1) % len(self.COLORS)
@@ -256,7 +271,7 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/content/DialogInterface;I)V")
             def onClick(self, dialog, which):
-                overlay.set_touchable(False)
+                overlay.set_touchable(not overlay.touchable)
 
         class CloseClickListener(PythonJavaClass):
             __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
@@ -270,7 +285,8 @@ class FloatMaskOverlay:
         builder = a["AlertDialogBuilder"](activity)
         builder.setTitle(JString("FloatMask 菜单"))
 
-        items = ["切换颜色", "点击穿透", "透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
+        mode_item = "点击穿透" if self.touchable else "恢复编辑模式"
+        items = ["切换颜色", mode_item, "透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
         listeners = [
             ColorClickListener(),
             TouchModeClickListener(),
@@ -305,6 +321,84 @@ class FloatMaskOverlay:
                                    if a["BuildVersion"].SDK_INT >= 26
                                    else a["LayoutParams"].TYPE_PHONE)
         dialog.show()
+
+    def _show_restore_button(self):
+        if not is_android() or self._wm is None:
+            return
+        if self._restore_view is not None:
+            return
+        a = self._android
+        activity = a["PythonActivity"].mActivity
+        layout_type = a["LayoutParams"].TYPE_APPLICATION_OVERLAY
+        if a["BuildVersion"].SDK_INT < 26:
+            layout_type = a["LayoutParams"].TYPE_PHONE
+
+        self._restore_params = a["LayoutParams"](88, 88, layout_type, a["LayoutParams"].FLAG_NOT_FOCUSABLE, -3)
+        self._restore_params.gravity = a["Gravity"].LEFT | a["Gravity"].TOP
+        display = activity.getWindowManager().getDefaultDisplay()
+        self._restore_params.x = max(16, int(display.getWidth()) - 120)
+        self._restore_params.y = max(120, int(display.getHeight() * 0.45))
+
+        JString = a["autoclass"]("java.lang.String")
+        restore = a["TextView"](activity)
+        restore.setText(a["cast"]("java.lang.CharSequence", JString("\u21BA")))  # ↺
+        restore.setTextSize(28)
+        restore.setTextColor(a["Color"].WHITE)
+        restore.setGravity(a["Gravity"].CENTER)
+        drawable = a["GradientDrawable"]()
+        drawable.setColor(a["Color"].argb(210, 0, 0, 0))
+        drawable.setStroke(3, a["Color"].WHITE)
+        drawable.setCornerRadius(44)
+        restore.setBackground(drawable)
+        restore.setOnClickListener(self._make_restore_click_listener())
+        restore.setOnLongClickListener(self._make_restore_long_listener())
+
+        self._restore_view = restore
+        view, params = self._restore_view, self._restore_params
+        _run_on_ui_thread(activity, lambda: self._wm.addView(view, params))
+
+    def _hide_restore_button(self):
+        if self._restore_view is None or self._wm is None or self._android is None:
+            self._restore_view = None
+            self._restore_params = None
+            return
+        try:
+            activity = self._android["PythonActivity"].mActivity
+            wm, view = self._wm, self._restore_view
+            _run_on_ui_thread(activity, lambda: wm.removeView(view))
+        except Exception:
+            pass
+        self._restore_view = None
+        self._restore_params = None
+
+    def _make_restore_click_listener(self):
+        from jnius import PythonJavaClass, java_method
+        overlay = self
+
+        class RestoreClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/view/View$OnClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/view/View;)V")
+            def onClick(self, view):
+                overlay.set_touchable(True)
+
+        return RestoreClickListener()
+
+    def _make_restore_long_listener(self):
+        from jnius import PythonJavaClass, java_method
+        overlay = self
+
+        class RestoreLongListener(PythonJavaClass):
+            __javainterfaces__ = ["android/view/View$OnLongClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/view/View;)Z")
+            def onLongClick(self, view):
+                overlay._show_long_press_menu()
+                return True
+
+        return RestoreLongListener()
 
     def _create_view(self):
         a = _android_imports()
