@@ -17,6 +17,8 @@ def _load_state():
             defaults.update(json.loads(STATE_FILE.read_text(encoding="utf-8")))
     except Exception:
         pass
+    # 透明度菜单已移除，颜色档位本身决定 alpha，避免纯黑档被旧透明度覆盖。
+    defaults["alpha"] = -1
     return defaults
 
 
@@ -29,8 +31,12 @@ def _save_state(state):
 
 def _run_on_ui_thread(activity, fn):
     """Execute fn() on the Android main UI thread and block until done."""
-    from jnius import PythonJavaClass, java_method
+    from jnius import PythonJavaClass, java_method, autoclass
     import threading
+
+    Looper = autoclass("android.os.Looper")
+    if Looper.myLooper() == Looper.getMainLooper():
+        return fn()
 
     done = threading.Event()
     exc_box = []
@@ -229,12 +235,15 @@ class FloatMaskOverlay:
 
     def switch_color(self):
         self.state["color"] = (int(self.state.get("color", 0)) + 1) % len(self.COLORS)
+        # 切换颜色时重置透明度为默认，让每档颜色显示其预设的 alpha
+        self.state["alpha"] = -1
         if is_android() and self._view is not None:
-            self._apply_background()
+            activity = self._android["PythonActivity"].mActivity
+            _run_on_ui_thread(activity, lambda: self._apply_background())
         _save_state(self.state)
 
     def _show_long_press_menu(self):
-        """长按弹出菜单：透明度调节 + 关闭"""
+        """长按弹出菜单：切换颜色、穿透模式和关闭。"""
         if not is_android():
             return
         a = self._android
@@ -242,20 +251,6 @@ class FloatMaskOverlay:
         overlay = self
 
         from jnius import PythonJavaClass, java_method
-
-        class AlphaClickListener(PythonJavaClass):
-            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
-            __javacontext__ = "app"
-
-            def __init__(self, alpha_value):
-                super().__init__()
-                self._alpha = alpha_value
-
-            @java_method("(Landroid/content/DialogInterface;I)V")
-            def onClick(self, dialog, which):
-                overlay.state["alpha"] = self._alpha
-                _save_state(overlay.state)
-                overlay._apply_background()
 
         class ColorClickListener(PythonJavaClass):
             __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
@@ -286,13 +281,10 @@ class FloatMaskOverlay:
         builder.setTitle(JString("FloatMask 菜单"))
 
         mode_item = "点击穿透" if self.touchable else "恢复编辑模式"
-        items = ["切换颜色", mode_item, "透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
+        items = ["切换颜色", mode_item, "关闭悬浮框"]
         listeners = [
             ColorClickListener(),
             TouchModeClickListener(),
-            AlphaClickListener(77),   # 30%  -> alpha 77/255
-            AlphaClickListener(153),  # 60%
-            AlphaClickListener(204),  # 80%
             CloseClickListener(),
         ]
 
@@ -320,7 +312,7 @@ class FloatMaskOverlay:
         dialog.getWindow().setType(a["LayoutParams"].TYPE_APPLICATION_OVERLAY
                                    if a["BuildVersion"].SDK_INT >= 26
                                    else a["LayoutParams"].TYPE_PHONE)
-        dialog.show()
+        _run_on_ui_thread(activity, lambda: dialog.show())
 
     def _show_restore_button(self):
         if not is_android() or self._wm is None:
@@ -329,33 +321,43 @@ class FloatMaskOverlay:
             return
         a = self._android
         activity = a["PythonActivity"].mActivity
-        layout_type = a["LayoutParams"].TYPE_APPLICATION_OVERLAY
-        if a["BuildVersion"].SDK_INT < 26:
-            layout_type = a["LayoutParams"].TYPE_PHONE
 
-        self._restore_params = a["LayoutParams"](88, 88, layout_type, a["LayoutParams"].FLAG_NOT_FOCUSABLE, -3)
-        self._restore_params.gravity = a["Gravity"].LEFT | a["Gravity"].TOP
-        display = activity.getWindowManager().getDefaultDisplay()
-        self._restore_params.x = max(16, int(display.getWidth()) - 120)
-        self._restore_params.y = max(120, int(display.getHeight() * 0.45))
+        def _do_show():
+            if self._restore_view is not None:
+                return
+            layout_type = a["LayoutParams"].TYPE_APPLICATION_OVERLAY
+            if a["BuildVersion"].SDK_INT < 26:
+                layout_type = a["LayoutParams"].TYPE_PHONE
 
-        JString = a["autoclass"]("java.lang.String")
-        restore = a["TextView"](activity)
-        restore.setText(a["cast"]("java.lang.CharSequence", JString("\u21BA")))  # ↺
-        restore.setTextSize(28)
-        restore.setTextColor(a["Color"].WHITE)
-        restore.setGravity(a["Gravity"].CENTER)
-        drawable = a["GradientDrawable"]()
-        drawable.setColor(a["Color"].argb(210, 0, 0, 0))
-        drawable.setStroke(3, a["Color"].WHITE)
-        drawable.setCornerRadius(44)
-        restore.setBackground(drawable)
-        restore.setOnClickListener(self._make_restore_click_listener())
-        restore.setOnLongClickListener(self._make_restore_long_listener())
+            size = 120
+            self._restore_params = a["LayoutParams"](size, size, layout_type, a["LayoutParams"].FLAG_NOT_FOCUSABLE, -3)
+            self._restore_params.gravity = a["Gravity"].LEFT | a["Gravity"].TOP
+            display = activity.getWindowManager().getDefaultDisplay()
+            self._restore_params.x = max(16, int(display.getWidth()) - 170)
+            self._restore_params.y = max(120, int(display.getHeight() * 0.45))
 
-        self._restore_view = restore
-        view, params = self._restore_view, self._restore_params
-        _run_on_ui_thread(activity, lambda: self._wm.addView(view, params))
+            JString = a["autoclass"]("java.lang.String")
+            restore = a["TextView"](activity)
+            restore.setText(a["cast"]("java.lang.CharSequence", JString("\u21BA")))  # ↺
+            restore.setTextSize(22)
+            restore.setTextColor(a["Color"].WHITE)
+            restore.setGravity(a["Gravity"].CENTER)
+            restore.setPadding(0, 0, 0, 10)
+            try:
+                restore.setIncludeFontPadding(True)
+            except Exception:
+                pass
+            drawable = a["GradientDrawable"]()
+            drawable.setShape(a["GradientDrawable"].OVAL)
+            drawable.setColor(a["Color"].argb(220, 0, 0, 0))
+            restore.setBackground(drawable)
+            restore.setOnClickListener(self._make_restore_click_listener())
+            restore.setOnLongClickListener(self._make_restore_long_listener())
+
+            self._restore_view = restore
+            self._wm.addView(self._restore_view, self._restore_params)
+
+        _run_on_ui_thread(activity, _do_show)
 
     def _hide_restore_button(self):
         if self._restore_view is None or self._wm is None or self._android is None:
@@ -475,77 +477,81 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
             def onTouch(self, view, event):
-                action = event.getAction()
-                now_ms = int(time.time() * 1000)
+                try:
+                    if overlay._params is None or overlay._view is None or MotionEvent is None:
+                        return True
 
-                if action == MotionEvent.ACTION_DOWN:
-                    overlay._start = {
-                        "raw_x": int(event.getRawX()),
-                        "raw_y": int(event.getRawY()),
-                        "x": int(overlay._params.x),
-                        "y": int(overlay._params.y),
-                        "w": int(overlay._params.width),
-                        "h": int(overlay._params.height),
-                        "moved": False,
-                        "long_fired": False,
-                        "time": now_ms,
-                    }
-                    return True
+                    action = event.getAction()
+                    now_ms = int(time.time() * 1000)
 
-                if action == MotionEvent.ACTION_MOVE and overlay._start:
-                    dx = int(event.getRawX()) - overlay._start["raw_x"]
-                    dy = int(event.getRawY()) - overlay._start["raw_y"]
-                    if abs(dx) > 8 or abs(dy) > 8:
-                        overlay._start["moved"] = True
-                    if overlay._start["moved"]:
-                        if resizing:
-                            overlay._resize(overlay._start["w"] + dx, overlay._start["h"] + dy)
-                        else:
-                            overlay._move(overlay._start["x"] + dx, overlay._start["y"] + dy)
-                        try:
-                            overlay._wm.updateViewLayout(overlay._view, overlay._params)
-                        except Exception:
-                            pass
-                    else:
-                        # 静止超过 LONG_PRESS_MS 触发长按
-                        if (not resizing
-                            and not overlay._start["long_fired"]
-                            and (now_ms - overlay._start["time"]) > overlay._LONG_PRESS_MS):
-                            overlay._start["long_fired"] = True
-                            overlay._show_long_press_menu()
-                    return True
-
-                if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
-                    if overlay._start and not overlay._start["moved"]:
-                        if overlay._minimized:
-                            overlay.toggle_minimize()
-                        elif resizing:
-                            overlay.toggle_minimize()
-                        elif not overlay._start["long_fired"]:
-                            held = now_ms - overlay._start["time"]
-                            if held > overlay._LONG_PRESS_MS:
-                                # 长按抬起也算长按
-                                overlay._show_long_press_menu()
-                            else:
-                                # tap — check double tap
-                                elapsed = now_ms - overlay._last_tap_time
-                                if 0 < elapsed < overlay._DOUBLE_TAP_MS:
-                                    overlay.switch_color()
-                                    overlay._last_tap_time = 0
-                                else:
-                                    overlay._last_tap_time = now_ms
-                    if overlay._start and overlay._start["moved"]:
-                        overlay.state.update({
+                    if action == MotionEvent.ACTION_DOWN:
+                        overlay._start = {
+                            "raw_x": int(event.getRawX()),
+                            "raw_y": int(event.getRawY()),
                             "x": int(overlay._params.x),
                             "y": int(overlay._params.y),
                             "w": int(overlay._params.width),
                             "h": int(overlay._params.height),
-                        })
-                        _save_state(overlay.state)
+                            "moved": False,
+                            "long_fired": False,
+                            "time": now_ms,
+                        }
+                        return True
+
+                    if action == MotionEvent.ACTION_MOVE and overlay._start:
+                        dx = int(event.getRawX()) - overlay._start["raw_x"]
+                        dy = int(event.getRawY()) - overlay._start["raw_y"]
+                        if abs(dx) > 8 or abs(dy) > 8:
+                            overlay._start["moved"] = True
+                        if overlay._start["moved"]:
+                            if resizing:
+                                overlay._resize(overlay._start["w"] + dx, overlay._start["h"] + dy)
+                            else:
+                                overlay._move(overlay._start["x"] + dx, overlay._start["y"] + dy)
+                            try:
+                                overlay._wm.updateViewLayout(overlay._view, overlay._params)
+                            except Exception:
+                                pass
+                        else:
+                            if (not resizing
+                                and not overlay._start["long_fired"]
+                                and (now_ms - overlay._start["time"]) > overlay._LONG_PRESS_MS):
+                                overlay._start["long_fired"] = True
+                                overlay._show_long_press_menu()
+                        return True
+
+                    if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+                        if overlay._start and not overlay._start["moved"]:
+                            if overlay._minimized:
+                                overlay.toggle_minimize()
+                            elif resizing:
+                                overlay.toggle_minimize()
+                            elif not overlay._start["long_fired"]:
+                                held = now_ms - overlay._start["time"]
+                                if held > overlay._LONG_PRESS_MS:
+                                    overlay._show_long_press_menu()
+                                else:
+                                    elapsed = now_ms - overlay._last_tap_time
+                                    if 0 < elapsed < overlay._DOUBLE_TAP_MS:
+                                        overlay.switch_color()
+                                        overlay._last_tap_time = 0
+                                    else:
+                                        overlay._last_tap_time = now_ms
+                        if overlay._start and overlay._start["moved"]:
+                            overlay.state.update({
+                                "x": int(overlay._params.x),
+                                "y": int(overlay._params.y),
+                                "w": int(overlay._params.width),
+                                "h": int(overlay._params.height),
+                            })
+                            _save_state(overlay.state)
+                        overlay._start = None
+                        return True
+
+                    return False
+                except Exception:
                     overlay._start = None
                     return True
-
-                return False
 
         return TouchListener()
 
@@ -554,28 +560,32 @@ class FloatMaskOverlay:
             return
         a = self._android
         activity = a["PythonActivity"].mActivity
-        if not self._minimized:
-            # 进入最小化：保存当前尺寸，缩小为 80x80 无边框圆点
-            self._restore_size = (int(self._params.width), int(self._params.height))
-            self._params.width = 80
-            self._params.height = 80
-            if self._hint is not None:
-                self._hint.setVisibility(self._android["View"].GONE)
-            if self._resize_btn is not None:
-                self._resize_btn.setVisibility(self._android["View"].GONE)
-            self._minimized = True
-        else:
-            w, h = self._restore_size or (200, 120)
-            self._params.width = int(w)
-            self._params.height = int(h)
-            if self._hint is not None:
-                self._hint.setVisibility(self._android["View"].VISIBLE)
-            if self._resize_btn is not None:
-                self._resize_btn.setVisibility(self._android["View"].VISIBLE)
-            self._minimized = False
-        self._apply_background()
-        wm, view, params = self._wm, self._view, self._params
-        _run_on_ui_thread(activity, lambda: wm.updateViewLayout(view, params))
+
+        def _do_toggle():
+            if not self._minimized:
+                # 进入最小化：保存当前尺寸，缩小为 80x80 无边框圆点
+                self._restore_size = (int(self._params.width), int(self._params.height))
+                self._params.width = 80
+                self._params.height = 80
+                if self._hint is not None:
+                    self._hint.setVisibility(a["View"].GONE)
+                if self._resize_btn is not None:
+                    self._resize_btn.setVisibility(a["View"].GONE)
+                self._minimized = True
+            else:
+                w, h = self._restore_size or (200, 120)
+                self._params.width = int(w)
+                self._params.height = int(h)
+                if self._hint is not None:
+                    self._hint.setVisibility(a["View"].VISIBLE)
+                if self._resize_btn is not None:
+                    self._resize_btn.setVisibility(a["View"].VISIBLE)
+                self._minimized = False
+            self._apply_background()
+            wm, view, params = self._wm, self._view, self._params
+            wm.updateViewLayout(view, params)
+
+        _run_on_ui_thread(activity, _do_toggle)
 
     def _move(self, x, y):
         display = self._wm.getDefaultDisplay()
@@ -605,18 +615,7 @@ class FloatMaskOverlay:
         a = self._android
         fill, stroke = self.COLORS[int(self.state.get("color", 0))]
         drawable = a["GradientDrawable"]()
-        base_color = a["Color"].parseColor(fill)
-        # 如果用户在长按菜单中手动调过透明度（alpha >= 0），用用户值覆盖；
-        # 否则尊重 COLORS 颜色中预设的 alpha 通道（保证"纯黑不透明"是真不透明）
-        user_alpha = int(self.state.get("alpha", -1))
-        if user_alpha >= 0:
-            r = (base_color >> 16) & 0xFF
-            g = (base_color >> 8) & 0xFF
-            b = base_color & 0xFF
-            final_color = a["Color"].argb(user_alpha, r, g, b)
-        else:
-            final_color = base_color
-        drawable.setColor(final_color)
+        drawable.setColor(a["Color"].parseColor(fill))
         if self._minimized:
             drawable.setCornerRadius(40)
         else:
