@@ -150,7 +150,7 @@ class FloatMaskOverlay:
         # minimize state
         self._minimized = False
         self._restore_size = None  # (w, h) before minimize
-        self._min_btn = None
+        self._hint = None
         self._resize_btn = None
 
     def show(self, touchable=True):
@@ -194,7 +194,7 @@ class FloatMaskOverlay:
                 pass
         self._view = None
         self._params = None
-        self._min_btn = None
+        self._hint = None
         self._resize_btn = None
         self._minimized = False
         self.visible = False
@@ -242,6 +242,22 @@ class FloatMaskOverlay:
                 _save_state(overlay.state)
                 overlay._apply_background()
 
+        class ColorClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, dialog, which):
+                overlay.switch_color()
+
+        class TouchModeClickListener(PythonJavaClass):
+            __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/content/DialogInterface;I)V")
+            def onClick(self, dialog, which):
+                overlay.set_touchable(False)
+
         class CloseClickListener(PythonJavaClass):
             __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
             __javacontext__ = "app"
@@ -254,8 +270,10 @@ class FloatMaskOverlay:
         builder = a["AlertDialogBuilder"](activity)
         builder.setTitle(JString("FloatMask 菜单"))
 
-        items = ["透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
+        items = ["切换颜色", "点击穿透", "透明度: 低 (30%)", "透明度: 中 (60%)", "透明度: 高 (80%)", "关闭悬浮框"]
         listeners = [
+            ColorClickListener(),
+            TouchModeClickListener(),
             AlphaClickListener(77),   # 30%  -> alpha 77/255
             AlphaClickListener(153),  # 60%
             AlphaClickListener(204),  # 80%
@@ -332,19 +350,9 @@ class FloatMaskOverlay:
         hint.setTextColor(a["Color"].WHITE)
         hint.setPadding(12, 8, 8, 8)
         frame.addView(hint)
+        self._hint = hint
 
-        # 最小化按钮（右上角）
-        min_btn = a["TextView"](activity)
-        min_btn.setText(a["cast"]("java.lang.CharSequence", JString("\u25CF")))  # ●
-        min_btn.setTextSize(16)
-        min_btn.setTextColor(a["Color"].WHITE)
-        min_btn.setGravity(a["Gravity"].CENTER)
-        min_params = a["FrameLayoutLayoutParams"](72, 72)
-        min_params.gravity = a["Gravity"].RIGHT | a["Gravity"].TOP
-        frame.addView(min_btn, min_params)
-        self._min_btn = min_btn
-
-        # 缩放按钮（右下角），尺寸放大并加 padding 防裁切
+        # 缩放按钮（右下角）：拖动缩放，轻点最小化
         resize = a["TextView"](activity)
         resize.setText(a["cast"]("java.lang.CharSequence", JString("\u2198")))
         resize.setTextSize(20)
@@ -358,7 +366,6 @@ class FloatMaskOverlay:
 
         frame.setOnTouchListener(self._make_touch_listener(False))
         resize.setOnTouchListener(self._make_touch_listener(True))
-        min_btn.setOnClickListener(self._make_minimize_listener())
         self._view = frame
 
     def _make_touch_listener(self, resizing):
@@ -415,22 +422,24 @@ class FloatMaskOverlay:
                     return True
 
                 if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
-                    if (overlay._start
-                        and not overlay._start["moved"]
-                        and not overlay._start["long_fired"]
-                        and not resizing):
-                        held = now_ms - overlay._start["time"]
-                        if held > overlay._LONG_PRESS_MS:
-                            # 长按抬起也算长按
-                            overlay._show_long_press_menu()
-                        else:
-                            # tap — check double tap
-                            elapsed = now_ms - overlay._last_tap_time
-                            if 0 < elapsed < overlay._DOUBLE_TAP_MS:
-                                overlay.switch_color()
-                                overlay._last_tap_time = 0
+                    if overlay._start and not overlay._start["moved"]:
+                        if overlay._minimized:
+                            overlay.toggle_minimize()
+                        elif resizing:
+                            overlay.toggle_minimize()
+                        elif not overlay._start["long_fired"]:
+                            held = now_ms - overlay._start["time"]
+                            if held > overlay._LONG_PRESS_MS:
+                                # 长按抬起也算长按
+                                overlay._show_long_press_menu()
                             else:
-                                overlay._last_tap_time = now_ms
+                                # tap — check double tap
+                                elapsed = now_ms - overlay._last_tap_time
+                                if 0 < elapsed < overlay._DOUBLE_TAP_MS:
+                                    overlay.switch_color()
+                                    overlay._last_tap_time = 0
+                                else:
+                                    overlay._last_tap_time = now_ms
                     if overlay._start and overlay._start["moved"]:
                         overlay.state.update({
                             "x": int(overlay._params.x),
@@ -446,30 +455,18 @@ class FloatMaskOverlay:
 
         return TouchListener()
 
-    def _make_minimize_listener(self):
-        from jnius import PythonJavaClass, java_method
-        overlay = self
-
-        class ClickListener(PythonJavaClass):
-            __javainterfaces__ = ["android/view/View$OnClickListener"]
-            __javacontext__ = "app"
-
-            @java_method("(Landroid/view/View;)V")
-            def onClick(self, view):
-                overlay.toggle_minimize()
-
-        return ClickListener()
-
     def toggle_minimize(self):
         if not is_android() or self._view is None:
             return
         a = self._android
         activity = a["PythonActivity"].mActivity
         if not self._minimized:
-            # 进入最小化：保存当前尺寸，缩小为 80x80 圆点
+            # 进入最小化：保存当前尺寸，缩小为 80x80 无边框圆点
             self._restore_size = (int(self._params.width), int(self._params.height))
             self._params.width = 80
             self._params.height = 80
+            if self._hint is not None:
+                self._hint.setVisibility(self._android["View"].GONE)
             if self._resize_btn is not None:
                 self._resize_btn.setVisibility(self._android["View"].GONE)
             self._minimized = True
@@ -477,26 +474,14 @@ class FloatMaskOverlay:
             w, h = self._restore_size or (200, 120)
             self._params.width = int(w)
             self._params.height = int(h)
+            if self._hint is not None:
+                self._hint.setVisibility(self._android["View"].VISIBLE)
             if self._resize_btn is not None:
                 self._resize_btn.setVisibility(self._android["View"].VISIBLE)
             self._minimized = False
+        self._apply_background()
         wm, view, params = self._wm, self._view, self._params
         _run_on_ui_thread(activity, lambda: wm.updateViewLayout(view, params))
-
-    def _make_long_press_listener(self):
-        from jnius import PythonJavaClass, java_method
-        overlay = self
-
-        class LongClickListener(PythonJavaClass):
-            __javainterfaces__ = ["android/view/View$OnLongClickListener"]
-            __javacontext__ = "app"
-
-            @java_method("(Landroid/view/View;)Z")
-            def onLongClick(self, view):
-                overlay._show_long_press_menu()
-                return True
-
-        return LongClickListener()
 
     def _move(self, x, y):
         display = self._wm.getDefaultDisplay()
@@ -538,6 +523,9 @@ class FloatMaskOverlay:
         else:
             final_color = base_color
         drawable.setColor(final_color)
-        drawable.setStroke(4, a["Color"].parseColor(stroke))
-        drawable.setCornerRadius(12)
+        if self._minimized:
+            drawable.setCornerRadius(40)
+        else:
+            drawable.setStroke(4, a["Color"].parseColor(stroke))
+            drawable.setCornerRadius(12)
         frame.setBackground(drawable)
