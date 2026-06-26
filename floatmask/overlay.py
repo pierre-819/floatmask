@@ -3,6 +3,7 @@ from pathlib import Path
 
 from kivy.utils import platform
 
+# 保存悬浮框的位置、大小、颜色等状态，下次启动时恢复。
 STATE_FILE = Path.home() / ".floatmask_state.json"
 
 
@@ -11,6 +12,7 @@ def is_android():
 
 
 def _load_state():
+    # x/y 为 -1 表示首次启动，稍后根据屏幕尺寸计算默认位置。
     defaults = {"x": -1, "y": -1, "w": 200, "h": 120, "color": 0, "alpha": -1}
     try:
         if STATE_FILE.exists():
@@ -30,7 +32,11 @@ def _save_state(state):
 
 
 def _run_on_ui_thread(activity, fn):
-    """Execute fn() on the Android main UI thread and block until done."""
+    """Execute fn() on the Android main UI thread and block until done.
+
+    Kivy 的按钮回调运行在 SDLThread，而 Android 的 View/WindowManager
+    操作必须在主线程执行，所以所有 addView/update/remove/background 更新都走这里。
+    """
     from jnius import PythonJavaClass, java_method, autoclass
     import threading
 
@@ -61,6 +67,7 @@ def _run_on_ui_thread(activity, fn):
 
 
 def _android_imports():
+    # pyjnius 在 Android 真机环境中动态加载 Java 类，避免在电脑端运行时报错。
     from jnius import autoclass, cast
 
     PythonActivity = autoclass("org.kivy.android.PythonActivity")
@@ -104,6 +111,7 @@ def _android_imports():
 
 
 def open_overlay_settings():
+    # 跳转到系统悬浮窗权限页；如果机型不支持该页面，则退回应用详情页。
     if not is_android():
         return
     a = _android_imports()
@@ -133,7 +141,12 @@ def check_overlay_permission():
 
 
 class FloatMaskOverlay:
-    # (fill_color_with_alpha, stroke_color)
+    """管理 Android 系统悬浮窗。
+
+    主遮挡框负责遮挡字幕；进入点击穿透模式后，主框不可触摸，
+    因此额外创建一个独立的“↺”恢复按钮用于回到编辑模式。
+    """
+    # (fill_color_with_alpha, stroke_color)；fill 前两位就是 alpha。
     COLORS = [
         ("#99333333", "#FF111111"),  # 半透明灰
         ("#CC000000", "#FFFFFFFF"),  # 半透明黑
@@ -163,6 +176,11 @@ class FloatMaskOverlay:
         self._restore_params = None
 
     def show(self, touchable=True):
+        """显示主遮挡框。
+
+        touchable=True 是编辑模式，可拖动、缩放、长按菜单；
+        touchable=False 是遮挡模式，主框点击穿透，同时显示独立恢复按钮。
+        """
         if not is_android():
             self.visible = True
             return
@@ -218,6 +236,7 @@ class FloatMaskOverlay:
         _save_state(self.state)
 
     def set_touchable(self, touchable):
+        # 通过 WindowManager flags 切换编辑/穿透；穿透时主框不再接收触摸。
         self.touchable = touchable
         if not is_android():
             return
@@ -234,6 +253,7 @@ class FloatMaskOverlay:
             self._show_restore_button()
 
     def switch_color(self):
+        # 三档循环：半透明灰 -> 半透明黑 -> 纯黑不透明。
         self.state["color"] = (int(self.state.get("color", 0)) + 1) % len(self.COLORS)
         # 切换颜色时重置透明度为默认，让每档颜色显示其预设的 alpha
         self.state["alpha"] = -1
@@ -281,6 +301,7 @@ class FloatMaskOverlay:
         builder.setTitle(JString("FloatMask 菜单"))
 
         mode_item = "点击穿透" if self.touchable else "恢复编辑模式"
+        # 透明度菜单已移除：颜色档位已经包含透明度，避免两个入口互相覆盖。
         items = ["切换颜色", mode_item, "关闭悬浮框"]
         listeners = [
             ColorClickListener(),
@@ -315,6 +336,11 @@ class FloatMaskOverlay:
         _run_on_ui_thread(activity, lambda: dialog.show())
 
     def _show_restore_button(self):
+        """显示独立恢复按钮。
+
+        主遮挡框进入 FLAG_NOT_TOUCHABLE 后无法再接收点击/长按，
+        所以恢复按钮必须是第二个 WindowManager 悬浮窗。
+        """
         if not is_android() or self._wm is None:
             return
         if self._restore_view is not None:
@@ -403,6 +429,7 @@ class FloatMaskOverlay:
         return RestoreLongListener()
 
     def _create_view(self):
+        """创建主悬浮框视图和 WindowManager.LayoutParams。"""
         a = _android_imports()
         self._android = a
         activity = a["PythonActivity"].mActivity
@@ -465,6 +492,11 @@ class FloatMaskOverlay:
         self._view = frame
 
     def _make_touch_listener(self, resizing):
+        """生成触摸监听器。
+
+        resizing=False 绑定到主框：拖动移动、长按菜单、双击换色；
+        resizing=True 绑定到右下角箭头：拖动缩放，轻点最小化。
+        """
         from jnius import PythonJavaClass, java_method
         import time
 
@@ -477,6 +509,7 @@ class FloatMaskOverlay:
 
             @java_method("(Landroid/view/View;Landroid/view/MotionEvent;)Z")
             def onTouch(self, view, event):
+                # Python 回调里任何异常都可能传回 Java 层导致崩溃，这里统一兜底。
                 try:
                     if overlay._params is None or overlay._view is None or MotionEvent is None:
                         return True
@@ -556,6 +589,7 @@ class FloatMaskOverlay:
         return TouchListener()
 
     def toggle_minimize(self):
+        # 最小化只改变主框尺寸和内部控件可见性，不销毁 Window，恢复更快。
         if not is_android() or self._view is None:
             return
         a = self._android
@@ -604,12 +638,14 @@ class FloatMaskOverlay:
         self._params.height = max(80, min(int(height), max_h))
 
     def _apply_flags(self):
+        # FLAG_NOT_TOUCHABLE 是真正点击穿透的关键；开启后主遮挡框不会收到触摸事件。
         flags = self._android["LayoutParams"].FLAG_NOT_FOCUSABLE
         if not self.touchable:
             flags |= self._android["LayoutParams"].FLAG_NOT_TOUCHABLE
         self._params.flags = flags
 
     def _apply_background(self, frame=None):
+        # 颜色的 alpha 直接写在 COLORS 中，保证第三档 #FF000000 是完全不透明。
         if frame is None:
             frame = self._view
         a = self._android
